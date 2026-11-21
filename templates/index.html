@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#142a23">
+  <title>Knightfall · Local Chess</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script defer src="{{ url_for('static', filename='game.js') }}"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="wordmark"><span class="brand-mark" aria-hidden="true">♞</span><h1>Knightfall</h1></div>
+      <span class="mode">Local two-player chess</span>
+    </div>
+  </header>
+
+  <main class="match">
+    <section class="table" aria-label="Chess table">
+      <div class="player" id="far-player"></div>
+      <div class="board-frame">
+        <div id="board" class="board" role="grid" aria-label="Chessboard, White at bottom"></div>
+      </div>
+      <div class="player" id="near-player"></div>
+    </section>
+
+    <aside class="panel" aria-labelledby="match-heading">
+      <div class="panel-status">
+        <h2 id="match-heading">Match</h2>
+        <div class="status-block" role="status" aria-atomic="true">
+          <div class="turn-line"><span id="turn-swatch" class="turn-swatch" aria-hidden="true"></span><strong id="turn">Loading match…</strong></div>
+          <p id="status"></p>
+        </div>
+      </div>
+
+      <section class="notation" aria-labelledby="notation-heading">
+        <h3 id="notation-heading">Move history</h3>
+        <div class="notation-scroll" id="notation-scroll" tabindex="0" aria-label="Scroll move history">
+          <table>
+            <thead><tr><th scope="col">#</th><th scope="col">White</th><th scope="col">Black</th></tr></thead>
+            <tbody id="moves"></tbody>
+          </table>
+          <p class="empty-history" id="empty-history">No moves yet</p>
+        </div>
+      </section>
+
+      <div class="controls">
+        <button class="primary" id="new-game" type="button" disabled>New game</button>
+        <div class="secondary-controls">
+          <button id="flip" type="button" aria-pressed="false" disabled><span aria-hidden="true">⇅</span> Flip board</button>
+          <button id="resign" type="button" disabled><span aria-hidden="true">⚑</span> Resign</button>
+        </div>
+        <button id="draw" type="button" disabled hidden>Claim draw</button>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <button id="retry" type="button" hidden>Reload position</button>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="game-dialog" aria-labelledby="game-title">
+    <form id="game-form">
+      <h2 id="game-title">New game</h2>
+      <p id="replacement-warning">Starting a new game will replace the current match on the board.</p>
+      <label>White player<input name="white" type="text" maxlength="32" placeholder="White" autocomplete="off"></label>
+      <label>Black player<input name="black" type="text" maxlength="32" placeholder="Black" autocomplete="off"></label>
+      <div class="dialog-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Start game</button></div>
+    </form>
+  </dialog>
+  <dialog id="resign-dialog" aria-labelledby="resign-title">
+    <form id="resign-form">
+      <h2 id="resign-title">Resign game?</h2>
+      <p id="resign-message"></p>
+      <div class="dialog-actions"><button type="button" data-close autofocus>Cancel</button><button class="primary" type="submit">Resign</button></div>
+    </form>
+  </dialog>
+  <dialog id="promotion-dialog" aria-labelledby="promotion-title">
+    <h2 id="promotion-title">Promote pawn</h2>
+    <p>Choose the piece for your pawn.</p>
+    <div id="promotion-options" class="promotions"></div>
+    <div class="dialog-actions"><button type="button" data-close>Cancel</button></div>
+  </dialog>
+  <dialog id="draw-dialog" aria-labelledby="draw-title">
+    <form id="draw-form">
+      <h2 id="draw-title">Claim draw</h2>
+      <p>Choose how to claim the draw. An intended move stays off the board.</p>
+      <label>Claim<select id="draw-options"></select></label>
+      <div class="dialog-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Claim draw</button></div>
+    </form>
+  </dialog>
+  <noscript><p class="noscript">Enable JavaScript to play Knightfall.</p></noscript>
+</body>
+</html>
