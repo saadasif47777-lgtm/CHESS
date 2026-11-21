@@ -22,6 +22,13 @@ Press Ctrl+C in the terminal to stop the server. Run `py app.py` again to
 resume the match. SQLite creates `instance/knightfall.sqlite3` on the first
 run. Keep that file to retain saved games.
 
+## Deploy
+
+The Flask entry point is `app:app`. For hosting with durable match storage,
+set `KNIGHTFALL_DB` to a database file on a writable, persistent volume.
+On Vercel, Knightfall defaults to temporary SQLite storage. Games can be
+lost when a function restarts or requests reach a different instance.
+
 ## Play
 
 The first visit starts a standard match with the names White and Black. Use

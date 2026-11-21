@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from tempfile import gettempdir
 
 import chess
 from flask import Flask, jsonify, render_template, request
@@ -35,11 +36,12 @@ def require_version(game, version):
         raise ApiError("The match changed. Reload the position and try again.", 409)
 
 
-def create_app(database_path=None):
-    app = Flask(__name__)
+def configure_app(app, database_path=None):
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+    # Vercel's deployed application directory is read-only.
+    data_dir = Path(gettempdir()) if os.environ.get("VERCEL") == "1" else Path(app.instance_path)
     path = Path(database_path or os.environ.get("KNIGHTFALL_DB")
-                or (Path(app.instance_path) / "knightfall.sqlite3"))
+                or (data_dir / "knightfall.sqlite3"))
     path.parent.mkdir(parents=True, exist_ok=True)
     database.initialize(path)
 
@@ -163,5 +165,15 @@ def create_app(database_path=None):
     return app
 
 
+def create_app(database_path=None):
+    """Create an isolated Flask app when tests supply their own SQLite path."""
+    return configure_app(Flask(__name__), database_path)
+
+
+# WSGI hosts import this instance as app:app.
+app = Flask(__name__)
+configure_app(app)
+
+
 if __name__ == "__main__":
-    create_app().run(host="127.0.0.1", port=5000)
+    app.run(host="127.0.0.1", port=5000)
