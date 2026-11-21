@@ -15,9 +15,11 @@ let flipped = false;
 let selected = null;
 let destinations = [];
 let selectionRequest = 0;
+let retrySquare = null;
 let focusSquare = "e2";
 let busy = false;
 let synchronized = false;
+let presentedResultId = null;
 
 class RequestError extends Error {
     constructor(message, status) {
@@ -34,16 +36,21 @@ async function request(path, data) {
         options.body = JSON.stringify(data);
     }
     const response = await fetch(path, options);
-    const body = await response.json();
+    const body = await response.json().catch(() => null);
     if (!response.ok) {
-        throw new RequestError(body.error || "The request failed.", response.status);
+        throw new RequestError(body?.error || "The request failed.", response.status);
     }
+    if (!body) throw new Error("The server response was not JSON.");
     return body;
 }
 
 function showNotice(message = "") {
     byId("notice").textContent = message;
-    byId("notice").hidden = !message;
+}
+
+function setLegalRetry(square = null) {
+    retrySquare = square;
+    byId("retry-legal").hidden = !square;
 }
 
 function colorOf(symbol) {
@@ -125,7 +132,7 @@ function renderPlayer(element, color) {
     label.setAttribute("aria-hidden", "true");
     const info = document.createElement("div");
     const name = document.createElement("strong");
-    name.textContent = game?.names[color] || (color === "white" ? "White" : "Black");
+    name.textContent = game?.names[color] || (color === "white" ? "Player 1" : "Player 2");
     const active = game && !game.result && game.turn === color;
     const side = document.createElement("span");
     side.className = "player-side";
@@ -143,23 +150,28 @@ function renderPlayer(element, color) {
 }
 
 function renderMoves() {
-    const rows = new Map();
     const fragment = document.createDocumentFragment();
-    for (const move of game.moves) {
-        if (!rows.has(move.number)) {
-            const row = document.createElement("tr");
-            const number = document.createElement("th");
-            number.scope = "row";
-            number.textContent = `${move.number}.`;
-            const white = document.createElement("td");
-            const black = document.createElement("td");
-            row.append(number, white, black);
-            rows.set(move.number, {white, black});
-            fragment.append(row);
+    for (const [index, move] of game.moves.entries()) {
+        const row = document.createElement("tr");
+        row.setAttribute("role", "row");
+        const number = document.createElement("th");
+        number.scope = "row";
+        number.setAttribute("role", "rowheader");
+        number.textContent = move.number;
+        row.append(number);
+        for (const [column, text] of Object.entries({
+            "move-player": `${game.names[move.color]} · ${capitalize(move.color)}`,
+            description: move.description,
+            san: move.san,
+        })) {
+            const cell = document.createElement("td");
+            cell.className = column;
+            cell.setAttribute("role", "cell");
+            cell.textContent = text;
+            row.append(cell);
         }
-        const cell = rows.get(move.number)[move.color];
-        cell.textContent = move.san;
-        if (move === game.moves.at(-1)) cell.className = "latest";
+        if (index === game.moves.length - 1) row.className = "latest";
+        fragment.append(row);
     }
     byId("moves").replaceChildren(fragment);
     byId("empty-history").hidden = game.moves.length > 0;
@@ -169,11 +181,23 @@ function renderMoves() {
 
 function renderControls() {
     const unavailable = !game || !synchronized || busy;
-    byId("new-game").textContent = game?.result ? "Play again" : "New game";
     byId("new-game").disabled = unavailable;
     byId("flip").disabled = !game || busy;
     byId("flip").setAttribute("aria-pressed", String(flipped));
     byId("resign").disabled = unavailable || Boolean(game?.result);
+    byId("view-result").hidden = !game?.result;
+    byId("view-result").disabled = busy;
+    byId("offer-draw").disabled = unavailable || !game?.can_offer_draw;
+    byId("offer-draw").hidden = Boolean(game?.result || game?.draw_offer);
+    byId("draw-offer").hidden = !game?.draw_offer;
+    byId("accept-draw").disabled = unavailable;
+    byId("decline-draw").disabled = unavailable;
+    const offerMessage = game?.draw_offer
+        ? `${game.names[game.draw_offer]} offers a draw. ${game.names[game.turn]} can accept, decline, or play on.`
+        : "";
+    if (byId("draw-offer-message").textContent !== offerMessage) {
+        byId("draw-offer-message").textContent = offerMessage;
+    }
     const canDraw = Boolean(game && (game.draw.now.length || game.draw.intended.length));
     byId("draw").hidden = !canDraw;
     byId("draw").disabled = unavailable || !canDraw;
@@ -202,6 +226,7 @@ function clearSelection() {
     selectionRequest++;
     selected = null;
     destinations = [];
+    setLegalRetry();
 }
 
 async function loadCurrent(createIfEmpty = false) {
@@ -232,15 +257,45 @@ async function loadCurrent(createIfEmpty = false) {
     }
 }
 
-function animateMove([from, to]) {
+async function animateMove(effects) {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const source = squareButton(from).getBoundingClientRect();
-    const target = squareButton(to).getBoundingClientRect();
-    const piece = squareButton(to).querySelector("img");
-    piece?.animate([
-        {transform: `translate(${source.x - target.x}px, ${source.y - target.y}px)`},
-        {transform: "translate(0, 0)"},
-    ], {duration: 155, easing: "ease-out"});
+    const surface = board.getBoundingClientRect();
+    const movingPieces = [];
+    const animations = [];
+    const settings = {duration: 215, easing: "ease-in-out", fill: "forwards"};
+
+    // Animate the pieces from the old position. A promoting pawn stays a
+    // pawn while it slides, and en passant fades the actual captured square.
+    for (const {from, to} of effects.slides) {
+        const original = squareButton(from).querySelector("img");
+        if (!original) continue;
+        const ghost = original.cloneNode();
+        const start = original.getBoundingClientRect();
+        const origin = squareButton(from).getBoundingClientRect();
+        const target = squareButton(to).getBoundingClientRect();
+        ghost.className = "sliding-piece";
+        Object.assign(ghost.style, {
+            left: `${start.x - surface.x}px`,
+            top: `${start.y - surface.y}px`,
+            width: `${start.width}px`,
+            height: `${start.height}px`,
+        });
+        original.style.visibility = "hidden";
+        board.append(ghost);
+        movingPieces.push({ghost, original});
+        animations.push(ghost.animate([
+            {transform: "translate(0, 0)"},
+            {transform: `translate(${target.x - origin.x}px, ${target.y - origin.y}px)`},
+        ], settings));
+    }
+    const captured = effects.capture && squareButton(effects.capture).querySelector("img");
+    if (captured) animations.push(captured.animate([{opacity: 1}, {opacity: 0}], settings));
+    await Promise.allSettled(animations.map((animation) => animation.finished));
+    for (const {ghost, original} of movingPieces) {
+        ghost.remove();
+        original.style.visibility = "";
+    }
+    for (const animation of animations) animation.cancel();
 }
 
 async function mutate(path, data, animate = false) {
@@ -252,9 +307,9 @@ async function mutate(path, data, animate = false) {
     renderControls();
     try {
         const response = await request(path, {...data, version: game.version});
+        if (animate) await animateMove(response.game.moves.at(-1).effects);
         game = response.game;
         render();
-        if (animate) animateMove(game.last_move);
     } catch (error) {
         if (error instanceof RequestError && error.status < 500 && error.status !== 409) {
             showNotice(error.message);
@@ -271,6 +326,7 @@ async function mutate(path, data, animate = false) {
         busy = false;
         renderControls();
     }
+    maybeShowResult();
 }
 
 function gamePath(action) {
@@ -290,31 +346,80 @@ async function chooseSquare(square) {
     clearSelection();
     showNotice();
     const symbol = game.pieces[square];
-    if (toggleOff || !symbol || colorOf(symbol) !== game.turn) {
+    if (toggleOff || !symbol) {
         renderBoard();
         return;
     }
+    if (colorOf(symbol) !== game.turn) {
+        showNotice(`It is ${game.names[game.turn]}’s turn (${capitalize(game.turn)}).`);
+        renderBoard();
+        return;
+    }
+    await loadLegalMoves(square);
+}
 
+async function loadLegalMoves(square) {
+    clearSelection();
     selected = square;
     const thisRequest = selectionRequest;
+    showNotice();
     renderBoard();
     try {
         const response = await request(`${gamePath("legal")}?square=${square}&version=${game.version}`);
         if (thisRequest !== selectionRequest) return;
+        if (response.selection === "finished") {
+            game = response.game;
+            clearSelection();
+            render();
+            maybeShowResult();
+            return;
+        }
+        if (!Array.isArray(response.destinations)) {
+            throw new Error("The server did not return a list of legal moves.");
+        }
         destinations = response.destinations;
+        if (response.selection === "blocked") showNotice("This piece has no legal moves. Select another piece.");
         renderBoard();
     } catch (error) {
         if (thisRequest !== selectionRequest) return;
-        clearSelection();
-        renderBoard();
         if (error.status === 409) {
             synchronized = false;
             renderControls();
-            if (await loadCurrent()) showNotice(error.message);
+            if (await loadCurrent()) {
+                showNotice(error.message);
+                maybeShowResult();
+            }
         } else {
-            showNotice("Could not load legal moves. Select a piece to try again.");
+            // Keep the match and selected square visible. Failure tells us
+            // nothing about the move list or whether the game has ended.
+            showNotice("Could not load legal moves. Retry to check this piece.");
+            setLegalRetry(square);
         }
     }
+}
+
+function capitalize(word) {
+    return word[0].toUpperCase() + word.slice(1);
+}
+
+function showResult() {
+    const result = game.result_details;
+    const dialog = byId("result-dialog");
+    if (!result || dialog.open) return;
+    const player = (entry) => `${entry.name} (${capitalize(entry.color)})`;
+    byId("result-title").textContent = result.winner ? "Game over" : "Game drawn";
+    byId("result-players").textContent = result.winner
+        ? `${player(result.winner)} wins — ${player(result.loser)} loses.`
+        : "Neither player wins.";
+    byId("result-score").textContent = result.score;
+    byId("result-score").setAttribute("aria-label", `Score ${result.score}`);
+    byId("result-reason").textContent = result.explanation;
+    presentedResultId = game.id;
+    dialog.showModal();
+}
+
+function maybeShowResult() {
+    if (game?.result && game.id !== presentedResultId) showResult();
 }
 
 function openPromotion(uci, options) {
@@ -343,6 +448,7 @@ board.addEventListener("click", (event) => {
 });
 
 board.addEventListener("keydown", (event) => {
+    if (busy && event.key === "Escape") return;
     const deltas = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]};
     const delta = deltas[event.key];
     const from = event.target.dataset.square;
@@ -373,9 +479,40 @@ byId("new-game").addEventListener("click", () => {
     const form = byId("game-form");
     form.elements.white.value = game.names.white;
     form.elements.black.value = game.names.black;
-    byId("game-title").textContent = game.result ? "Play again" : "New game";
     byId("replacement-warning").hidden = Boolean(game.result);
     byId("game-dialog").showModal();
+});
+
+byId("retry-legal").addEventListener("click", () => {
+    if (retrySquare && synchronized && !busy) {
+        squareButton(retrySquare)?.focus({preventScroll: true});
+        void loadLegalMoves(retrySquare);
+    }
+});
+
+byId("offer-draw").addEventListener("click", () => {
+    const offerer = game.moves.at(-1).color;
+    byId("offer-message").textContent = `${game.names[offerer]} (${capitalize(offerer)}), offer your opponent a draw?`;
+    byId("offer-dialog").showModal();
+});
+
+byId("offer-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    byId("offer-dialog").close();
+    void mutate(gamePath("draw/offer"), {});
+});
+
+byId("accept-draw").addEventListener("click", () => void mutate(gamePath("draw/respond"), {accept: true}));
+byId("decline-draw").addEventListener("click", () => void mutate(gamePath("draw/respond"), {accept: false}));
+
+byId("view-result").addEventListener("click", showResult);
+byId("review-board").addEventListener("click", () => {
+    byId("result-dialog").close();
+    squareButton(game.last_move.at(-1) || focusSquare)?.focus({preventScroll: true});
+});
+byId("start-again").addEventListener("click", () => {
+    byId("result-dialog").close();
+    void mutate("/api/games", {...game.names, previous_id: game.id});
 });
 
 byId("game-form").addEventListener("submit", (event) => {
@@ -425,6 +562,7 @@ async function reload() {
     await loadCurrent(true);
     busy = false;
     renderControls();
+    maybeShowResult();
 }
 
 byId("retry").addEventListener("click", reload);

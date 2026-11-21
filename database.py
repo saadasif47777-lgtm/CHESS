@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import chess
 
+import rules
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -15,7 +17,8 @@ CREATE TABLE IF NOT EXISTS games (
     initial_fen TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 0,
     winner TEXT,
-    reason TEXT
+    reason TEXT,
+    draw_offer TEXT
 );
 
 CREATE TABLE IF NOT EXISTS moves (
@@ -36,6 +39,7 @@ class Game:
     board: chess.Board
     moves: list
     result: dict | None
+    draw_offer: str | None
 
 
 @contextmanager
@@ -57,11 +61,14 @@ def transaction(path, *, write=False):
 
 
 def initialize(path):
-    connection = sqlite3.connect(path)
-    try:
+    with transaction(path) as connection:
         connection.executescript(SCHEMA)
-    finally:
-        connection.close()
+    # Keep the existing database in place. Serialize the schema check and
+    # upgrade so two workers can safely open the same older file.
+    with transaction(path, write=True) as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(games)")}
+        if "draw_offer" not in columns:
+            connection.execute("ALTER TABLE games ADD COLUMN draw_offer TEXT")
 
 
 def current_game_id(connection):
@@ -81,22 +88,20 @@ def load_game(connection, game_id):
     notation = []
     # A final FEN alone loses repetition history. Replay the stored UCI moves
     # to rebuild both the current position and python-chess's move stack.
-    for move in moves:
-        notation.append({
-            "number": board.fullmove_number,
-            "color": "white" if board.turn == chess.WHITE else "black",
-            "san": move["san"],
-        })
-        board.push_uci(move["uci"])
+    for row_move in moves:
+        move = board.parse_uci(row_move["uci"])
+        notation.append(rules.move_details(board, move, row_move["san"]))
+        board.push(move)
     result = {"winner": row["winner"], "reason": row["reason"]} if row["reason"] else None
     return Game(row["id"], {"white": row["white_name"], "black": row["black_name"]},
-                row["version"], board, notation, result)
+                row["version"], board, notation, result, row["draw_offer"])
 
 
 def create_game(connection, white, black, initial_fen=chess.STARTING_FEN):
+    result = rules.automatic_result(chess.Board(initial_fen))
     cursor = connection.execute(
-        "INSERT INTO games (white_name, black_name, initial_fen) VALUES (?, ?, ?)",
-        (white, black, initial_fen),
+        "INSERT INTO games (white_name, black_name, initial_fen, winner, reason) VALUES (?, ?, ?, ?, ?)",
+        (white, black, initial_fen, result["winner"] if result else None, result["reason"] if result else None),
     )
     return load_game(connection, cursor.lastrowid)
 
@@ -106,18 +111,15 @@ def record_move(connection, game, move, san):
         "INSERT INTO moves (game_id, ply, uci, san) VALUES (?, ?, ?, ?)",
         (game.id, len(game.moves) + 1, move.uci(), san),
     )
-    game.moves.append({
-        "number": game.board.fullmove_number,
-        "color": "white" if game.board.turn == chess.WHITE else "black",
-        "san": san,
-    })
+    game.moves.append(rules.move_details(game.board, move, san))
 
 
-def save_action(connection, game, result):
-    """Save result and version in the same transaction as any new move."""
+def save_action(connection, game, result=None, draw_offer=None):
+    """Save result, offer and version in the same transaction as any new move."""
     connection.execute(
-        "UPDATE games SET version = version + 1, winner = ?, reason = ? WHERE id = ?",
-        (result["winner"] if result else None, result["reason"] if result else None, game.id),
+        "UPDATE games SET version = version + 1, winner = ?, reason = ?, draw_offer = ? WHERE id = ?",
+        (result["winner"] if result else None, result["reason"] if result else None, draw_offer, game.id),
     )
     game.version += 1
     game.result = result
+    game.draw_offer = draw_offer

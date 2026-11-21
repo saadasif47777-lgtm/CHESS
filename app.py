@@ -1,4 +1,4 @@
-"""Run Knightfall locally and expose its JSON API."""
+"""Run Alderwick Chess Club locally and expose its JSON API."""
 
 import os
 from pathlib import Path
@@ -28,7 +28,7 @@ def player_name(data, color):
     name = data.get(color, "")
     if not isinstance(name, str) or len(name.strip()) > 32:
         raise ApiError("Player names must be text with at most 32 characters.")
-    return name.strip() or color.capitalize()
+    return name.strip() or ("Player 1" if color == "white" else "Player 2")
 
 
 def require_version(game, version):
@@ -40,7 +40,8 @@ def configure_app(app, database_path=None):
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
     # Vercel's deployed application directory is read-only.
     data_dir = Path(gettempdir()) if os.environ.get("VERCEL") == "1" else Path(app.instance_path)
-    path = Path(database_path or os.environ.get("KNIGHTFALL_DB")
+    # Keep the original filename and accept the old override for saved installs.
+    path = Path(database_path or os.environ.get("ALDERWICK_DB") or os.environ.get("KNIGHTFALL_DB")
                 or (data_dir / "knightfall.sqlite3"))
     path.parent.mkdir(parents=True, exist_ok=True)
     database.initialize(path)
@@ -110,8 +111,17 @@ def configure_app(app, database_path=None):
             require_version(game, request.args.get("version", type=int))
             if database.current_game_id(connection) != game_id:
                 raise ApiError("A new match has started on this device.", 409)
-        destinations = [] if game.result else rules.legal_destinations(game.board, square)
-        return jsonify(destinations=destinations)
+        # An empty list is valid for a blocked piece. An ended game is reported
+        # explicitly, and errors use HTTP status codes so the UI can retry.
+        if game.result:
+            return jsonify(selection="finished", destinations=[], game=rules.game_state(game))
+        piece = game.board.piece_at(square)
+        if piece is None:
+            return jsonify(selection="empty", destinations=[])
+        if piece.color != game.board.turn:
+            return jsonify(selection="wrong_color", destinations=[], turn=rules.color_name(game.board.turn))
+        destinations = rules.legal_destinations(game.board, square)
+        return jsonify(selection="legal" if destinations else "blocked", destinations=destinations)
 
     @app.post("/api/games/<int:game_id>/move")
     def play_move(game_id):
@@ -128,11 +138,14 @@ def configure_app(app, database_path=None):
             # parse_uci also recognizes a null move. Passing is illegal in chess.
             if not move:
                 raise ApiError("Passing is illegal in chess.")
+            if game.board.piece_type_at(move.to_square) == chess.KING:
+                raise ApiError("The king cannot be captured.")
             # SAN depends on the position before the move. Save it alongside
             # UCI, then advance the board and check whether the match ended.
             san = game.board.san(move)
             database.record_move(connection, game, move, san)
             game.board.push(move)
+            # A legal reply declines a pending draw offer in the same write.
             database.save_action(connection, game, rules.automatic_result(game.board))
         return jsonify(game=rules.game_state(game))
 
@@ -158,8 +171,31 @@ def configure_app(app, database_path=None):
         data = json_body()
         with database.transaction(path, write=True) as connection:
             game = active_game(connection, game_id, data)
-            winner = rules.color_name(not game.board.turn)
-            database.save_action(connection, game, {"winner": winner, "reason": "resignation"})
+            database.save_action(connection, game, rules.resignation_result(game.board))
+        return jsonify(game=rules.game_state(game))
+
+    @app.post("/api/games/<int:game_id>/draw/offer")
+    def offer_draw(game_id):
+        data = json_body()
+        with database.transaction(path, write=True) as connection:
+            game = active_game(connection, game_id, data)
+            if not rules.can_offer_draw(game):
+                raise ApiError("Both players must have moved and there must be no pending offer.")
+            database.save_action(connection, game, draw_offer=rules.color_name(not game.board.turn))
+        return jsonify(game=rules.game_state(game))
+
+    @app.post("/api/games/<int:game_id>/draw/respond")
+    def respond_to_draw(game_id):
+        data = json_body()
+        accepted = data.get("accept")
+        if type(accepted) is not bool:
+            raise ApiError("Choose whether to accept the offer.")
+        with database.transaction(path, write=True) as connection:
+            game = active_game(connection, game_id, data)
+            if game.draw_offer != rules.color_name(not game.board.turn):
+                raise ApiError("There is no draw offer for the current player.")
+            result = {"winner": None, "reason": "agreement"} if accepted else None
+            database.save_action(connection, game, result)
         return jsonify(game=rules.game_state(game))
 
     return app
